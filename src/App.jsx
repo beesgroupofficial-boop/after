@@ -4,7 +4,6 @@ import React, { useState, useEffect, useMemo } from "react";
 const db = window._db;
 const COL = { records: "after_records", config: "app_config" };
 const CONFIG_DOC = "main";
-const ADMIN_PASS = "1111";
 
 async function fsSet(col, id, data) { await db.collection(col).doc(String(id)).set(data); }
 async function fsMerge(col, id, data) { await db.collection(col).doc(String(id)).set(data, { merge: true }); }
@@ -78,38 +77,6 @@ function Toast({ toast }) {
   );
 }
 
-// ───────── ログイン ─────────
-function Login({ onLogin }) {
-  const [mode, setMode] = useState(null);
-  const [pass, setPass] = useState("");
-  const [err, setErr] = useState("");
-  return (
-    <div style={{ minHeight: "100vh", background: C.plum, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: FONT }}>
-      <div style={{ width: "100%", maxWidth: 360 }}>
-        <div style={{ color: "#fff", fontSize: 30, fontWeight: 700, letterSpacing: "0.04em" }}>アフターバック</div>
-        <div style={{ color: "#D9CCF5", fontSize: 14, marginTop: 6, marginBottom: 32 }}>アフターの売上とキャストバックを記録します</div>
-        {mode !== "admin" ? (
-          <>
-            <button style={{ ...primaryBtn, background: "#fff", color: C.plum, marginBottom: 12 }} onClick={() => onLogin("staff")}>スタッフで入る</button>
-            <button style={{ ...primaryBtn, background: "transparent", border: "1px solid #B9A3EA" }} onClick={() => setMode("admin")}>管理者で入る</button>
-          </>
-        ) : (
-          <>
-            <input type="password" inputMode="numeric" autoFocus placeholder="パスワード" value={pass}
-              onChange={e => { setPass(e.target.value); setErr(""); }}
-              onKeyDown={e => { if (e.key === "Enter") (pass === ADMIN_PASS ? onLogin("admin") : setErr("パスワードが違います")); }}
-              style={{ ...inp, marginBottom: 8 }} />
-            {err && <div style={{ color: "#FECACA", fontSize: 13, marginBottom: 8 }}>{err}</div>}
-            <button style={{ ...primaryBtn, background: "#fff", color: C.plum, marginBottom: 12 }}
-              onClick={() => (pass === ADMIN_PASS ? onLogin("admin") : setErr("パスワードが違います"))}>ログイン</button>
-            <button style={{ ...primaryBtn, background: "transparent", border: "1px solid #B9A3EA" }} onClick={() => { setMode(null); setPass(""); setErr(""); }}>戻る</button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ───────── 入力タブ ─────────
 function InputTab({ config, showToast }) {
   const { castList, backRates, stores } = config;
@@ -148,7 +115,7 @@ function InputTab({ config, showToast }) {
   if (castList.length === 0) {
     return (
       <div style={{ ...card, textAlign: "center", color: C.mid, fontSize: 14, lineHeight: 1.8 }}>
-        キャストが登録されていません。<br />管理者でログインし、設定タブからキャストを追加してください。
+        キャストが登録されていません。<br />設定タブからキャストを追加してください。
       </div>
     );
   }
@@ -491,7 +458,6 @@ function SettingsTab({ config, showToast }) {
 const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BAR MASH"] };
 
 export default function App() {
-  const [role, setRole] = useState(() => { try { return localStorage.getItem("after_role"); } catch { return null; } });
   const [tab, setTab] = useState("input");
   const [records, setRecords] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -504,8 +470,6 @@ export default function App() {
     clearTimeout(window.__afterToast);
     window.__afterToast = setTimeout(() => setToast(null), 2200);
   }
-  function login(r) { try { localStorage.setItem("after_role", r); } catch {} setRole(r); setTab("input"); }
-  function logout() { try { localStorage.removeItem("after_role"); } catch {} setRole(null); }
 
   useEffect(() => {
     if (!db) return;
@@ -528,22 +492,13 @@ export default function App() {
   if (!db) {
     return <div style={{ padding: 24, fontFamily: FONT }}>Firebaseが初期化されていません。index.html の firebaseConfig を確認してください。</div>;
   }
-  if (!role) return <Login onLogin={login} />;
-
-  const isAdmin = role === "admin";
-  const tabs = isAdmin
-    ? [["input", "入力"], ["summary", "集計"], ["settings", "設定"]]
-    : [["input", "入力"], ["summary", "集計"]];
+  const isAdmin = true; // 管理者専用アプリ：ログインなしで全機能を使う
+  const tabs = [["input", "入力"], ["summary", "集計"], ["settings", "設定"]];
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: FONT, color: C.text, paddingTop: "env(safe-area-inset-top, 0px)" }}>
       <div style={{ maxWidth: 520, margin: "0 auto", padding: "14px 16px calc(96px + env(safe-area-inset-bottom, 0px))" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <div style={{ fontSize: 20, fontWeight: 700, color: C.plum }}>アフターバック</div>
-          <button onClick={logout} style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 8, padding: "5px 10px", fontSize: 12, color: C.mid, cursor: "pointer", fontFamily: FONT }}>
-            {isAdmin ? "管理者" : "スタッフ"}・ログアウト
-          </button>
-        </div>
+        <div style={{ fontSize: 20, fontWeight: 700, color: C.plum, marginBottom: 8 }}>アフターバック</div>
 
         {!loaded ? (
           <div style={{ textAlign: "center", color: C.light, padding: "60px 0" }}>読み込み中…</div>
