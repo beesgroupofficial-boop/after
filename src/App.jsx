@@ -38,6 +38,23 @@ function shortDate(d) {
   return `${parseInt(d.slice(5, 7), 10)}/${parseInt(d.slice(8, 10), 10)}(${w})`;
 }
 
+// 複数キャスト対応：バック率は一番高いキャストに合わせ、バック総額をキャスト人数で折半（1円未満切り捨て）
+function computeAfter(amount, castRates) {
+  const casts = Object.keys(castRates);
+  const backRate = casts.length ? Math.max(...casts.map(c => castRates[c])) : 0;
+  const { taxExcluded, backAmount } = calcBack(amount, backRate);
+  const share = casts.length ? Math.floor(backAmount / casts.length) : 0;
+  return { taxExcluded, backRate, backAmount, share };
+}
+// 旧形式（cast 1人）の明細も同じ形で扱う
+function castsOf(r) { return Array.isArray(r.casts) && r.casts.length ? r.casts : [r.cast]; }
+function shareOf(r) { return r.share ?? r.backAmount ?? 0; }
+function castRatesOf(r) {
+  if (r.castRates) return r.castRates;
+  const m = {}; castsOf(r).forEach(c => { m[c] = r.backRate ?? 0.1; }); return m;
+}
+function toggleIn(list, v) { return list.includes(v) ? list.filter(x => x !== v) : [...list, v]; }
+
 // ───────── デザイン ─────────
 const C = {
   bg: "#F6F4F9", surface: "#FFFFFF", border: "#E4DFEC", text: "#1E1B24",
@@ -82,7 +99,7 @@ function InputTab({ config, showToast }) {
   const { castList, backRates, stores } = config;
   const [date, setDate] = useState(businessDate());
   const [store, setStore] = useState(stores[0] || "");
-  const [cast, setCast] = useState("");
+  const [casts, setCasts] = useState([]);
   const [customerName, setCustomerName] = useState("");
   const [amount, setAmount] = useState("");
   const [memo, setMemo] = useState("");
@@ -90,9 +107,10 @@ function InputTab({ config, showToast }) {
 
   useEffect(() => { if (!stores.includes(store)) setStore(stores[0] || ""); }, [stores]);
 
-  const rate = cast ? rateOf(backRates, cast, date) : 0;
-  const { taxExcluded, backAmount } = calcBack(amount, rate);
-  const canSave = cast && Number(amount) > 0 && date && !saving;
+  const castRates = {};
+  casts.forEach(c => { castRates[c] = rateOf(backRates, c, date); });
+  const { taxExcluded, backRate, backAmount, share } = computeAfter(amount, castRates);
+  const canSave = casts.length > 0 && Number(amount) > 0 && date && !saving;
 
   async function save() {
     if (!canSave) return;
@@ -100,12 +118,13 @@ function InputTab({ config, showToast }) {
     try {
       const id = Date.now() + "_a";
       await fsSet(COL.records, id, {
-        id, date, store, cast, customerName: customerName.trim(), memo: memo.trim(),
-        amount: Number(amount), taxExcluded, backRate: rate, backAmount,
+        id, date, store, casts, cast: casts.join("・"), castRates,
+        customerName: customerName.trim(), memo: memo.trim(),
+        amount: Number(amount), taxExcluded, backRate, backAmount, share,
         createdAt: new Date().toISOString(),
       });
-      showToast(`登録しました ${cast} バック${yen(backAmount)}`);
-      setCustomerName(""); setAmount(""); setMemo(""); setCast("");
+      showToast(casts.length > 1 ? `登録しました ${casts.length}人で折半 1人${yen(share)}` : `登録しました ${casts[0]} バック${yen(share)}`);
+      setCustomerName(""); setAmount(""); setMemo(""); setCasts([]);
     } catch (e) {
       showToast("登録できませんでした。通信状態を確認してください", false);
     }
@@ -119,6 +138,8 @@ function InputTab({ config, showToast }) {
       </div>
     );
   }
+
+  const row = { display: "flex", justifyContent: "space-between", fontSize: 13, color: C.mid, marginTop: 4 };
 
   return (
     <div>
@@ -134,9 +155,9 @@ function InputTab({ config, showToast }) {
         </>
       )}
 
-      <div style={label}>キャスト</div>
+      <div style={label}>キャスト（複数選べます）</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {castList.map(c => <button key={c} style={pill(cast === c)} onClick={() => setCast(c)}>{c}</button>)}
+        {castList.map(c => <button key={c} style={pill(casts.includes(c))} onClick={() => setCasts(toggleIn(casts, c))}>{c}</button>)}
       </div>
 
       <div style={label}>金額（税込）</div>
@@ -150,16 +171,17 @@ function InputTab({ config, showToast }) {
       <input type="text" placeholder="例：〇〇でアフター" value={memo} onChange={e => setMemo(e.target.value)} style={inp} />
 
       <div style={{ ...card, background: C.lilac, borderColor: "#DCCFF6", marginTop: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.mid }}>
-          <span>税抜</span><span>{yen(taxExcluded)}</span>
+        <div style={{ ...row, marginTop: 0 }}><span>税抜</span><span>{yen(taxExcluded)}</span></div>
+        <div style={row}>
+          <span>バック率{casts.length ? `（${periodKeyOf(date) === "p1" ? "1〜15日" : "16〜末日"}${casts.length > 1 ? "・高い方" : ""}）` : ""}</span>
+          <span>{casts.length ? `${Math.round(backRate * 100)}%` : "キャストを選択"}</span>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.mid, marginTop: 4 }}>
-          <span>バック率{cast ? `（${periodKeyOf(date) === "p1" ? "1〜15日" : "16〜末日"}）` : ""}</span>
-          <span>{cast ? `${Math.round(rate * 100)}%` : "キャストを選択"}</span>
-        </div>
+        {casts.length > 1 && (
+          <div style={row}><span>バック総額（{casts.length}人で折半）</span><span>{yen(backAmount)}</span></div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 10 }}>
-          <span style={{ fontSize: 14, fontWeight: 700, color: C.plum }}>バック</span>
-          <span style={{ fontSize: 28, fontWeight: 700, color: C.plum }}>{yen(backAmount)}</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: C.plum }}>{casts.length > 1 ? "1人あたりバック" : "バック"}</span>
+          <span style={{ fontSize: 28, fontWeight: 700, color: C.plum }}>{yen(share)}</span>
         </div>
       </div>
 
@@ -171,24 +193,32 @@ function InputTab({ config, showToast }) {
   );
 }
 
-// ───────── 編集モーダル（管理者） ─────────
+// ───────── 編集モーダル ─────────
 function EditModal({ record, config, onClose, showToast }) {
   const [date, setDate] = useState(record.date);
   const [store, setStore] = useState(record.store || "");
-  const [cast, setCast] = useState(record.cast);
+  const [castRates, setCastRates] = useState(castRatesOf(record));
   const [customerName, setCustomerName] = useState(record.customerName || "");
   const [amount, setAmount] = useState(String(record.amount));
   const [memo, setMemo] = useState(record.memo || "");
-  const [rate, setRate] = useState(record.backRate ?? 0.1);
-  const { taxExcluded, backAmount } = calcBack(amount, rate);
-  const castOptions = config.castList.includes(cast) ? config.castList : [cast, ...config.castList];
+  const casts = Object.keys(castRates);
+  const { taxExcluded, backRate, backAmount, share } = computeAfter(amount, castRates);
+  const extra = castsOf(record).filter(c => !config.castList.includes(c));
+  const castOptions = [...extra, ...config.castList];
   const storeOptions = !store || config.stores.includes(store) ? config.stores : [store, ...config.stores];
 
+  function toggleCast(c) {
+    const next = { ...castRates };
+    if (c in next) delete next[c]; else next[c] = rateOf(config.backRates, c, date);
+    setCastRates(next);
+  }
+
   async function save() {
-    if (!cast || !(Number(amount) > 0)) return;
+    if (casts.length === 0 || !(Number(amount) > 0)) return;
     await fsSet(COL.records, record.id, {
-      ...record, date, store, cast, customerName: customerName.trim(), memo: memo.trim(),
-      amount: Number(amount), taxExcluded, backRate: rate, backAmount,
+      ...record, date, store, casts, cast: casts.join("・"), castRates,
+      customerName: customerName.trim(), memo: memo.trim(),
+      amount: Number(amount), taxExcluded, backRate, backAmount, share,
       updatedAt: new Date().toISOString(),
     });
     showToast("変更を保存しました");
@@ -213,23 +243,37 @@ function EditModal({ record, config, onClose, showToast }) {
             {storeOptions.map(s => <button key={s} style={pill(store === s)} onClick={() => setStore(s)}>{s}</button>)}
           </div>
         </>)}
-        <div style={label}>キャスト</div>
+        <div style={label}>キャスト（複数選べます）</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {castOptions.map(c => <button key={c} style={pill(cast === c)} onClick={() => setCast(c)}>{c}</button>)}
+          {castOptions.map(c => <button key={c} style={pill(c in castRates)} onClick={() => toggleCast(c)}>{c}</button>)}
         </div>
         <div style={label}>金額（税込）</div>
         <input type="number" inputMode="numeric" value={amount} onChange={e => setAmount(e.target.value)} style={inp} />
-        <div style={label}>バック率</div>
-        <div style={{ display: "flex", gap: 6 }}>
-          {[0.1, 0.15].map(r => <button key={r} style={{ ...pill(rate === r), flex: 1 }} onClick={() => setRate(r)}>{Math.round(r * 100)}%</button>)}
-        </div>
+        {casts.length > 0 && (<>
+          <div style={label}>バック率{casts.length > 1 ? "（高い方に合わせて折半）" : ""}</div>
+          {casts.map(c => (
+            <div key={c} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: C.plum, minWidth: 72 }}>{c}</span>
+              {[0.1, 0.15].map(r => (
+                <button key={r} style={{ ...pill(castRates[c] === r), flex: 1 }} onClick={() => setCastRates({ ...castRates, [c]: r })}>{Math.round(r * 100)}%</button>
+              ))}
+            </div>
+          ))}
+        </>)}
         <div style={label}>お客様名</div>
         <input type="text" value={customerName} onChange={e => setCustomerName(e.target.value)} style={inp} />
         <div style={label}>メモ</div>
         <input type="text" value={memo} onChange={e => setMemo(e.target.value)} style={inp} />
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "18px 2px 12px" }}>
-          <span style={{ fontSize: 14, color: C.mid }}>バック</span>
-          <span style={{ fontSize: 24, fontWeight: 700, color: C.plum }}>{yen(backAmount)}</span>
+        <div style={{ margin: "18px 2px 12px" }}>
+          {casts.length > 1 && (
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.mid, marginBottom: 4 }}>
+              <span>バック総額（{Math.round(backRate * 100)}%・{casts.length}人で折半）</span><span>{yen(backAmount)}</span>
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 14, color: C.mid }}>{casts.length > 1 ? "1人あたりバック" : "バック"}</span>
+            <span style={{ fontSize: 24, fontWeight: 700, color: C.plum }}>{yen(share)}</span>
+          </div>
         </div>
         <button onClick={save} style={primaryBtn}>変更を保存</button>
       </div>
@@ -249,30 +293,44 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
     return records.filter(r => r.date >= s && r.date <= e);
   }, [records, month, period]);
 
+  // 折半した明細は、参加したキャストそれぞれに1人分のバックを計上
   const castSummary = useMemo(() => {
     const m = {};
     periodData.forEach(r => {
-      if (!m[r.cast]) m[r.cast] = { cast: r.cast, count: 0, amount: 0, backAmount: 0, records: [] };
-      m[r.cast].count++;
-      m[r.cast].amount += r.amount || 0;
-      m[r.cast].backAmount += r.backAmount || 0;
-      m[r.cast].records.push(r);
+      castsOf(r).forEach(c => {
+        if (!m[c]) m[c] = { cast: c, count: 0, backAmount: 0, records: [] };
+        m[c].count++;
+        m[c].backAmount += shareOf(r);
+        m[c].records.push(r);
+      });
     });
     Object.values(m).forEach(x => x.records.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)));
     return Object.values(m).sort((a, b) => b.backAmount - a.backAmount);
   }, [periodData]);
 
-  const totalBack = periodData.reduce((a, r) => a + (r.backAmount || 0), 0);
+  const totalBack = periodData.reduce((a, r) => a + shareOf(r) * castsOf(r).length, 0);
   const totalAmount = periodData.reduce((a, r) => a + (r.amount || 0), 0);
   const periodLabel = period === "p1" ? "1〜15日" : "16〜末日";
 
+  // キャスト単位の削除：1人の明細は削除、折半の明細はそのキャストだけ外して再計算
+  async function removeCastFrom(r, cast) {
+    const rates = { ...castRatesOf(r) };
+    delete rates[cast];
+    const rest = Object.keys(rates);
+    if (rest.length === 0) return fsDel(COL.records, r.id);
+    const calc = computeAfter(r.amount, rates);
+    return fsSet(COL.records, r.id, { ...r, casts: rest, cast: rest.join("・"), castRates: rates, ...calc, updatedAt: new Date().toISOString() });
+  }
   async function delCast(cast, recs) {
-    if (!window.confirm(`${cast}の${month.replace("-", "年")}月 ${periodLabel}分を全部削除しますか？`)) return;
-    for (const r of recs) await fsDel(COL.records, r.id);
+    const shared = recs.filter(r => castsOf(r).length > 1).length;
+    const note = shared ? `\n（折半の${shared}件は${cast}だけ外し、残りのキャストで再計算します）` : "";
+    if (!window.confirm(`${cast}の${month.replace("-", "年")}月 ${periodLabel}分を全部削除しますか？${note}`)) return;
+    for (const r of recs) await removeCastFrom(r, cast);
     showToast(`${cast}の明細を削除しました`);
   }
   async function delOne(r) {
-    if (!window.confirm(`${shortDate(r.date)} ${r.cast} ${yen(r.amount)} を削除しますか？`)) return;
+    const who = castsOf(r).join("・");
+    if (!window.confirm(`${shortDate(r.date)} ${who} ${yen(r.amount)} を削除しますか？`)) return;
     await fsDel(COL.records, r.id);
     showToast("削除しました");
   }
@@ -296,8 +354,9 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
         <div style={{ textAlign: "center", color: C.light, padding: "36px 0", fontSize: 14 }}>この期間のアフターはまだありません</div>
       )}
 
-      {castSummary.map(({ cast, count, amount, backAmount, records: recs }) => {
+      {castSummary.map(({ cast, count, backAmount, records: recs }) => {
         const open = openCast === cast;
+        const sharedCount = recs.filter(r => castsOf(r).length > 1).length;
         return (
           <div key={cast} style={{ ...card, marginBottom: 10, padding: 0, overflow: "hidden" }}>
             <button onClick={() => setOpenCast(open ? null : cast)} style={{
@@ -306,7 +365,7 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
             }}>
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>{cast}</div>
-                <div style={{ fontSize: 12, color: C.light, marginTop: 2 }}>{count}件　売上 {yen(amount)}</div>
+                <div style={{ fontSize: 12, color: C.light, marginTop: 2 }}>{count}件{sharedCount ? `（うち折半${sharedCount}件）` : ""}</div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 20, fontWeight: 700, color: C.plum }}>{yen(backAmount)}</span>
@@ -315,26 +374,32 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
             </button>
             {open && (
               <div style={{ padding: "0 16px 12px" }}>
-                {recs.map(r => (
-                  <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 0", borderTop: `1px solid ${C.border}`, fontSize: 13 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ color: C.text }}>
-                        {shortDate(r.date)}　{yen(r.amount)}
-                        <span style={{ color: C.light }}>（{Math.round((r.backRate ?? 0) * 100)}%）</span>
+                {recs.map(r => {
+                  const others = castsOf(r).filter(c => c !== cast);
+                  return (
+                    <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 0", borderTop: `1px solid ${C.border}`, fontSize: 13 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ color: C.text }}>
+                          {shortDate(r.date)}　{yen(r.amount)}
+                          <span style={{ color: C.light }}>（{Math.round((r.backRate ?? 0) * 100)}%）</span>
+                        </div>
+                        {others.length > 0 && (
+                          <div style={{ color: C.violet, fontSize: 12, fontWeight: 600 }}>{others.join("・")}と折半（総額{yen(r.backAmount)}）</div>
+                        )}
+                        <div style={{ color: C.light, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {[r.store, r.customerName && `${r.customerName}様`, r.memo].filter(Boolean).join("／")}
+                        </div>
                       </div>
-                      <div style={{ color: C.light, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {[r.store, r.customerName && `${r.customerName}様`, r.memo].filter(Boolean).join("／")}
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontWeight: 700 }}>{yen(shareOf(r))}</span>
+                        {isAdmin && (<>
+                          <button onClick={() => onEdit(r)} style={{ background: C.lilac, border: "none", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: C.plum, cursor: "pointer" }}>編集</button>
+                          <button onClick={() => delOne(r)} style={{ background: "none", border: "none", color: C.light, cursor: "pointer", fontSize: 15 }}>✕</button>
+                        </>)}
                       </div>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                      <span style={{ fontWeight: 700 }}>{yen(r.backAmount)}</span>
-                      {isAdmin && (<>
-                        <button onClick={() => onEdit(r)} style={{ background: C.lilac, border: "none", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: C.plum, cursor: "pointer" }}>編集</button>
-                        <button onClick={() => delOne(r)} style={{ background: "none", border: "none", color: C.light, cursor: "pointer", fontSize: 15 }}>✕</button>
-                      </>)}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {isAdmin && (
                   <button onClick={() => delCast(cast, recs)} style={{ marginTop: 8, background: "none", border: `1px solid ${C.danger}`, borderRadius: 8, padding: "6px 12px", fontSize: 12, color: C.danger, cursor: "pointer" }}>
                     {cast}のこの期間を全部削除
