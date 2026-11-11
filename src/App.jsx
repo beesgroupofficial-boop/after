@@ -97,7 +97,6 @@ function printAfterSlips(castSummary, month, period) {
     const day = r => esc(String(r.date || "").slice(5).replace("-", "/"));
     const sub = r => r.taxExcluded ?? Math.floor((Number(r.amount) || 0) / 1.1);
     const subTotal = recs.reduce((a, r) => a + sub(r), 0);
-    const tax = Math.floor((Number(c.backAmount) || 0) * 1021 / 10000);
     const rate = r => r.backRate == null ? "−" : Math.round(Number(r.backRate) * 1000) / 10 + "%";
     let body;
     if (recs.length <= 14) {
@@ -112,9 +111,7 @@ function printAfterSlips(castSummary, month, period) {
     }
     return "<div class=cell><div class=head><b>アフターバック明細</b></div><div class=mid>" + esc(label) + "</div><div class=name>" + esc(c.cast) + "<small>様</small></div><div class=rows>" + body + "</div>"
       + "<div class=note>※小計＝税抜。バック＝小計×率（折半は人数で割ります）</div>"
-      + "<div class=total><div class=line><span class=mid>" + c.count + "件 ／ 小計 " + yen(subTotal) + "</span><span>バック合計 " + yen(c.backAmount) + "</span></div>"
-      + "<div class=line><span></span><span>源泉所得税（10.21%） −" + yen(tax) + "</span></div>"
-      + "<div class='line pay'><span>支給額</span><span class=sum>" + yen(c.backAmount - tax) + "</span></div></div></div>";
+      + "<div class=total><div class=line><span class=mid>" + c.count + "件 ／ 小計 " + yen(subTotal) + "</span><span>合計 <span class=sum>" + yen(c.backAmount) + "</span></span></div></div></div>";
   };
   let sheets = "";
   for (let i = 0; i < list.length; i += 6) {
