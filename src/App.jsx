@@ -81,6 +81,64 @@ const primaryBtn = {
   color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", fontFamily: FONT,
 };
 
+// ───────── 明細の印刷（A4に6人分・2列×3段・点線で切って給料袋へ） ─────────
+function printAfterSlips(castSummary, month, period) {
+  if (!castSummary.length) { alert("この期間のアフターデータはありません"); return; }
+  const y = +month.slice(0, 4), m = +month.slice(5, 7), last = new Date(y, m, 0).getDate();
+  const label = y + "年" + m + "月 " + (period === "p1" ? "1〜15日" : "16〜" + last + "日");
+  const esc = v => String(v == null ? "" : v).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const list = [...castSummary].sort((a, b) => a.cast.localeCompare(b.cast, "ja"));
+  const slip = c => {
+    const recs = [...c.records].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+    const desc = r => {
+      const others = castsOf(r).filter(x => x !== c.cast);
+      return esc([r.store, r.customerName && r.customerName + "様"].filter(Boolean).join(" ")) + (others.length ? "（" + (others.length + 1) + "名折半）" : "");
+    };
+    const day = r => esc(String(r.date || "").slice(5).replace("-", "/"));
+    const sub = r => r.taxExcluded ?? Math.floor((Number(r.amount) || 0) / 1.1);
+    const subTotal = recs.reduce((a, r) => a + sub(r), 0);
+    const tax = Math.floor((Number(c.backAmount) || 0) * 1021 / 10000);
+    const rate = r => r.backRate == null ? "−" : Math.round(Number(r.backRate) * 1000) / 10 + "%";
+    let body;
+    if (recs.length <= 14) {
+      body = "<table><thead><tr><th>日付</th><th>店・お客様</th><th class=r>小計</th><th class=r>率</th><th class=r>バック</th></tr></thead><tbody>"
+        + recs.map(r => "<tr><td>" + day(r) + "</td><td>" + desc(r) + "</td><td class=r>" + yen(sub(r)) + "</td><td class=r>" + rate(r) + "</td><td class=r>" + yen(shareOf(r)) + "</td></tr>").join("") + "</tbody></table>";
+    } else {
+      // 明細が多い人は2列に分けて並べる（小計は下の合計欄に表示）
+      const half = Math.ceil(recs.length / 2);
+      const t = part => "<table><thead><tr><th>日付</th><th>店・お客様</th><th class=r>率</th><th class=r>バック</th></tr></thead><tbody>"
+        + part.map(r => "<tr><td>" + day(r) + "</td><td>" + desc(r) + "</td><td class=r>" + rate(r) + "</td><td class=r>" + yen(shareOf(r)) + "</td></tr>").join("") + "</tbody></table>";
+      body = "<div class=two>" + t(recs.slice(0, half)) + t(recs.slice(half)) + "</div>";
+    }
+    return "<div class=cell><div class=head><b>アフターバック明細</b></div><div class=mid>" + esc(label) + "</div><div class=name>" + esc(c.cast) + "<small>様</small></div><div class=rows>" + body + "</div>"
+      + "<div class=note>※小計＝税抜。バック＝小計×率（折半は人数で割ります）</div>"
+      + "<div class=total><div class=line><span class=mid>" + c.count + "件 ／ 小計 " + yen(subTotal) + "</span><span>バック合計 " + yen(c.backAmount) + "</span></div>"
+      + "<div class=line><span></span><span>源泉所得税（10.21%） −" + yen(tax) + "</span></div>"
+      + "<div class='line pay'><span>支給額</span><span class=sum>" + yen(c.backAmount - tax) + "</span></div></div></div>";
+  };
+  let sheets = "";
+  for (let i = 0; i < list.length; i += 6) {
+    let cells = ""; for (let j = 0; j < 6; j++) cells += list[i + j] ? slip(list[i + j]) : "<div class=cell></div>";
+    sheets += "<div class=sheet>" + cells + "</div>";
+  }
+  const css = "*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Noto Sans JP','Hiragino Sans','Hiragino Kaku Gothic ProN',sans-serif;color:#1A1A1A;background:#F2F2F2}"
+    + ".sheet{width:210mm;height:297mm;background:#fff;margin:12px auto;display:grid;grid-template-columns:105mm 105mm;grid-template-rows:99mm 99mm 99mm}"
+    + ".cell{border-right:.3mm dashed #999;border-bottom:.3mm dashed #999;padding:6mm 6mm 5mm;overflow:hidden;display:flex;flex-direction:column;font-size:10pt}"
+    + ".cell:nth-child(2n){border-right:none}.cell:nth-child(n+5){border-bottom:none}"
+    + ".head{border-bottom:.4mm solid #1A1A1A;padding-bottom:1.5mm;margin-bottom:2mm}"
+    + ".mid{font-size:.85em;color:#595959}.name{font-size:1.6em;font-weight:700;margin:1mm 0 1.5mm}.name small{font-size:.55em;font-weight:400;margin-left:1mm}"
+    + "table{width:100%;border-collapse:collapse;font-size:.9em;line-height:1.25}th,td{padding:.2em .35em;border-bottom:.2mm solid #ccc;text-align:left;vertical-align:top}th{color:#595959;font-size:.9em}.r{text-align:right;white-space:nowrap}"
+    + ".rows{flex:1;min-height:0;overflow:hidden}.two{display:flex;gap:3mm;align-items:flex-start}.two table{flex:1}"
+    + ".note{font-size:.75em;color:#595959;margin-top:1mm}.total{margin-top:1.5mm;border-top:.4mm solid #1A1A1A;padding-top:1mm}"
+    + ".line{display:flex;justify-content:space-between;align-items:baseline;line-height:1.35}.line.pay{border-top:.2mm solid #999;margin-top:.8mm;padding-top:.8mm;font-weight:700}.sum{font-size:1.5em;font-weight:700}"
+    + "@page{size:A4;margin:0}@media print{body{background:#fff}.sheet{margin:0;break-after:page}.sheet:last-child{break-after:auto}}";
+  const fit = "document.querySelectorAll('.cell').forEach(function(c){var r=c.querySelector('.rows');if(!r)return;var f=10;while((r.scrollHeight>r.clientHeight+1||c.scrollHeight>c.clientHeight+1)&&f>4.5){f-=0.5;c.style.fontSize=f+'pt';}});setTimeout(function(){window.print();},300);";
+  const html = "<!DOCTYPE html><html lang=ja><head><meta charset=UTF-8><title>アフターバック明細 " + esc(label) + "</title><style>" + css + "</style></head><body>" + sheets + "<script>window.onload=function(){" + fit + "};<\/script></body></html>";
+  const w = window.open("", "_blank");
+  if (!w) { alert("印刷用の画面を開けませんでした。ポップアップのブロックを解除してください。"); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
 // ───────── トースト ─────────
 function Toast({ toast }) {
   if (!toast) return null;
@@ -343,6 +401,14 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
           <button key={v} style={{ ...pill(period === v), flex: 1 }} onClick={() => setPeriod(v)}>{l}</button>
         ))}
       </div>
+      <button onClick={() => printAfterSlips(castSummary, month, period)} disabled={castSummary.length === 0}
+        style={{ width: "100%", marginBottom: 14, padding: "11px 0", borderRadius: 10, border: `1.5px solid ${C.plum}`, background: C.surface, color: C.plum,
+          fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: FONT, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+          opacity: castSummary.length === 0 ? 0.4 : 1 }}>
+        {/* Tabler Icons: printer (MIT) */}
+        <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M17 17h2a2 2 0 0 0 2 -2v-4a2 2 0 0 0 -2 -2h-14a2 2 0 0 0 -2 2v4a2 2 0 0 0 2 2h2" /><path d="M17 9v-4a2 2 0 0 0 -2 -2h-6a2 2 0 0 0 -2 2v4" /><path d="M7 15a2 2 0 0 1 2 -2h6a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-6a2 2 0 0 1 -2 -2l0 -4" /></svg>
+        明細を印刷（A4・6人）
+      </button>
 
       <div style={{ background: C.plum, color: "#fff", borderRadius: 16, padding: "18px 18px 16px", marginBottom: 14 }}>
         <div style={{ fontSize: 13, color: "#D9CCF5" }}>{parseInt(month.slice(5, 7), 10)}月 {periodLabel}のバック合計</div>
