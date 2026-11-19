@@ -7,6 +7,7 @@ const db = window._db;
 const COL = { records: "after_casts", mine: "after_records", config: "app_config" };
 // このアプリ専用の設定(キャスト・バック率・店舗)。MASHレジが使う app_config/main とは別の文書
 const CONFIG_DOC = "after";
+const MASH_STORE = "BAR MASH"; // MASHレジのアフターと同じ店舗名。この店舗で入力した分はレジ(after_casts)にも出る
 
 async function fsSet(col, id, data) { await db.collection(col).doc(String(id)).set(data); }
 async function fsMerge(col, id, data) { await db.collection(col).doc(String(id)).set(data, { merge: true }); }
@@ -210,9 +211,12 @@ function Toast({ toast }) {
 
 // ───────── 入力タブ ─────────
 function InputTab({ config, showToast }) {
-  const { castList, backRates, stores } = config;
+  // 店舗は「このアプリの店舗」＋「BAR MASH」。BAR MASHで入力した分はMASHレジの「アフター」タブにも出る
+  const stores = [...config.stores.filter(s => s !== MASH_STORE), MASH_STORE];
   const [date, setDate] = useState(businessDate());
   const [store, setStore] = useState(stores[0] || "");
+  const eff = store === MASH_STORE ? config.mash : config; // キャスト・バック率は店舗ごと(BAR MASHはMASHレジの設定)
+  const castList = eff.castList, backRates = eff.backRates;
   const [casts, setCasts] = useState([]);
   const [customerName, setCustomerName] = useState("");
   const [amount, setAmount] = useState("");
@@ -230,7 +234,7 @@ function InputTab({ config, showToast }) {
     if (!canSave) return;
     setSaving(true);
     try {
-      await writeGroup({ saleId: "after_" + Date.now(), docIds: {} }, casts, castRates,
+      await writeGroup({ saleId: "after_" + Date.now(), docIds: {}, col: store === MASH_STORE ? COL.records : COL.mine }, casts, castRates,
         { date, store, customerName: customerName.trim(), memo: memo.trim(), amount: Number(amount) });
       showToast(casts.length > 1 ? `登録しました ${casts.length}人で折半 1人${yen(share)}` : `登録しました ${casts[0]} バック${yen(share)}`);
       setCustomerName(""); setAmount(""); setMemo(""); setCasts([]);
@@ -259,7 +263,7 @@ function InputTab({ config, showToast }) {
         <>
           <div style={label}>店舗</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {stores.map(s => <button key={s} style={pill(store === s)} onClick={() => setStore(s)}>{s}</button>)}
+            {stores.map(s => <button key={s} style={pill(store === s)} onClick={() => { setStore(s); setCasts([]); }}>{s}</button>)}
           </div>
         </>
       )}
@@ -312,13 +316,14 @@ function EditModal({ record, config, onClose, showToast }) {
   const [memo, setMemo] = useState(record.memo || "");
   const casts = Object.keys(castRates);
   const { taxExcluded, backRate, backAmount, share } = computeAfter(amount, castRates);
-  const extra = castsOf(record).filter(c => !config.castList.includes(c));
-  const castOptions = [...extra, ...config.castList];
-  const storeOptions = !store || config.stores.includes(store) ? config.stores : [store, ...config.stores];
+  const eff = store === MASH_STORE ? config.mash : config; // 店舗ごとのキャスト・バック率
+  const extra = castsOf(record).filter(c => !eff.castList.includes(c));
+  const castOptions = [...extra, ...eff.castList];
+  const storeOptions = [store]; // 保存先が店舗ごとに違うため、編集では店舗は変えられない
 
   function toggleCast(c) {
     const next = { ...castRates };
-    if (c in next) delete next[c]; else next[c] = rateOf(config.backRates, c, date);
+    if (c in next) delete next[c]; else next[c] = rateOf(eff.backRates, c, date);
     setCastRates(next);
   }
 
@@ -462,20 +467,34 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
       </div>
 
       {(() => {
-        // キャスト別のアフター件数（折半の伝票も、参加した各キャストに1件ずつ数える。MASHレジの数え方と同じ）
-        const cm = {};
-        records.forEach(r => castsOf(r).forEach(c => {
-          if (!cm[c]) cm[c] = { cast: c, p1: 0, p2: 0 };
-          cm[c][periodKeyOf(r.date)]++;
-        }));
+        // キャスト別のアフター件数とバック金額(店舗の内訳つき)。折半の伝票は、参加した各キャストに1件ずつ数える(MASHレジの数え方と同じ)
+        const cm = {}, sm = {};
+        records.forEach(r => {
+          const st = r.store || "店舗不明";
+          if (!sm[st]) sm[st] = { store: st, n: 0, back: 0 };
+          castsOf(r).forEach(c => {
+            const pk = periodKeyOf(r.date), amt = shareFor(r, c);
+            if (!cm[c]) cm[c] = { cast: c, p1: 0, p2: 0, b1: 0, b2: 0, stores: {} };
+            cm[c][pk]++;
+            cm[c][pk === "p1" ? "b1" : "b2"] += amt;
+            cm[c].stores[st] = (cm[c].stores[st] || 0) + 1;
+            sm[st].n++; sm[st].back += amt;
+          });
+        });
         const rows = Object.values(cm).sort((a, b) => (b.p1 + b.p2) - (a.p1 + a.p2) || a.cast.localeCompare(b.cast, "ja"));
         if (!rows.length) return null;
-        const tot = rows.reduce((a, x) => ({ p1: a.p1 + x.p1, p2: a.p2 + x.p2 }), { p1: 0, p2: 0 });
-        const cell = (on) => ({ textAlign: "right", padding: "8px 6px", fontSize: 15, fontWeight: on ? 700 : 500, color: on ? C.plum : C.text, whiteSpace: "nowrap" });
+        const tot = rows.reduce((a, x) => ({ p1: a.p1 + x.p1, p2: a.p2 + x.p2, b1: a.b1 + x.b1, b2: a.b2 + x.b2 }), { p1: 0, p2: 0, b1: 0, b2: 0 });
         const head = { textAlign: "right", padding: "4px 6px 8px", fontSize: 12, color: C.mid, fontWeight: 600, whiteSpace: "nowrap" };
+        const num = (n, amt, on, big) => (
+          <td style={{ textAlign: "right", padding: "8px 6px 2px", whiteSpace: "nowrap", verticalAlign: "top" }}>
+            <div style={{ fontSize: big ? 17 : 15, fontWeight: on ? 700 : 500, color: on ? C.plum : C.text }}>{n}件</div>
+            <div style={{ fontSize: 12, color: C.mid }}>{n ? yen(amt) : "−"}</div>
+          </td>
+        );
+        const storeList = Object.values(sm).sort((a, b) => b.n - a.n);
         return (
           <div style={{ ...card, marginBottom: 14 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{parseInt(month.slice(5, 7), 10)}月 キャスト別アフター件数</div>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{parseInt(month.slice(5, 7), 10)}月 キャスト別アフター（件数・バック金額）</div>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
@@ -487,21 +506,37 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
               </thead>
               <tbody>
                 {rows.map(x => (
-                  <tr key={x.cast} style={{ borderTop: "1px solid " + C.border }}>
-                    <td style={{ ...cell(false), textAlign: "left", paddingLeft: 0, fontWeight: 700, color: C.plum }}>{x.cast}</td>
-                    <td style={cell(period === "p1")}>{x.p1}件</td>
-                    <td style={cell(period === "p2")}>{x.p2}件</td>
-                    <td style={{ ...cell(true), fontSize: 17 }}>{x.p1 + x.p2}件</td>
-                  </tr>
+                  <React.Fragment key={x.cast}>
+                    <tr style={{ borderTop: "1px solid " + C.border }}>
+                      <td style={{ padding: "8px 0 2px", fontSize: 15, fontWeight: 700, color: C.plum, verticalAlign: "top" }}>{x.cast}</td>
+                      {num(x.p1, x.b1, period === "p1", false)}
+                      {num(x.p2, x.b2, period === "p2", false)}
+                      {num(x.p1 + x.p2, x.b1 + x.b2, true, true)}
+                    </tr>
+                    <tr>
+                      <td colSpan={4} style={{ padding: "0 0 8px", fontSize: 12, color: C.violet, fontWeight: 600 }}>
+                        {Object.keys(x.stores).sort((a, b) => x.stores[b] - x.stores[a]).map(s => s + " " + x.stores[s] + "件").join("　／　")}
+                      </td>
+                    </tr>
+                  </React.Fragment>
                 ))}
                 <tr style={{ borderTop: "2px solid " + C.border }}>
-                  <td style={{ ...cell(false), textAlign: "left", paddingLeft: 0, color: C.mid }}>合計（のべ）</td>
-                  <td style={cell(false)}>{tot.p1}件</td>
-                  <td style={cell(false)}>{tot.p2}件</td>
-                  <td style={{ ...cell(true), fontSize: 17 }}>{tot.p1 + tot.p2}件</td>
+                  <td style={{ padding: "8px 0", fontSize: 14, color: C.mid, verticalAlign: "top" }}>合計（のべ）</td>
+                  {num(tot.p1, tot.b1, false, false)}
+                  {num(tot.p2, tot.b2, false, false)}
+                  {num(tot.p1 + tot.p2, tot.b1 + tot.b2, true, true)}
                 </tr>
               </tbody>
             </table>
+            <div style={{ borderTop: "1px solid " + C.border, marginTop: 8, paddingTop: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.mid, marginBottom: 4 }}>店舗別（のべ件数・バック合計）</div>
+              {storeList.map(s => (
+                <div key={s.store} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0" }}>
+                  <span style={{ fontWeight: 600 }}>{s.store}</span>
+                  <span>{s.n}件　<b>{yen(s.back)}</b></span>
+                </div>
+              ))}
+            </div>
           </div>
         );
       })()}
@@ -680,6 +715,7 @@ const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BEROBEROBAR"] };
 
 export default function App() {
   const [tab, setTab] = useState("input");
+  const [mashCfg, setMashCfg] = useState({ castList: [], backRates: {} }); // MASHレジの設定(afterCastList / afterBackRates)
   const [rawA, setRawA] = useState([]); // MASHレジ由来(after_casts)
   const [rawB, setRawB] = useState([]); // このアプリで入力した分(after_records)
   const records = useMemo(() => normalizeRecords(rawA.concat(rawB)), [rawA, rawB]);
@@ -723,8 +759,18 @@ export default function App() {
       });
       setLoaded(true);
     }, () => showToast("設定を読み込めません。通信状態を確認してください", false));
-    return () => u2();
+    // BAR MASHで入力するとき用に、MASHレジのキャスト・バック率を読む(読むだけ。書き換えない)
+    const u3 = db.collection(COL.config).doc("main").onSnapshot(snap => {
+      const d = snap.data() || {};
+      setMashCfg({
+        castList: Array.isArray(d.afterCastList) ? d.afterCastList : [],
+        backRates: d.afterBackRates || {},
+      });
+    }, () => {});
+    return () => { u2(); u3(); };
   }, []);
+
+  const fullConfig = { ...config, mash: mashCfg };
 
   if (!db) {
     return <div style={{ padding: 24, fontFamily: FONT }}>Firebaseが初期化されていません。index.html の firebaseConfig を確認してください。</div>;
@@ -741,7 +787,7 @@ export default function App() {
           <div style={{ textAlign: "center", color: C.light, padding: "60px 0" }}>読み込み中…</div>
         ) : (
           <>
-            {tab === "input" && <InputTab config={config} showToast={showToast} />}
+            {tab === "input" && <InputTab config={fullConfig} showToast={showToast} />}
             {tab === "summary" && <SummaryTab records={records} month={month} setMonth={setMonth} isAdmin={isAdmin} onEdit={setEditing} showToast={showToast} />}
             {tab === "settings" && isAdmin && <SettingsTab config={config} showToast={showToast} />}
           </>
@@ -763,7 +809,7 @@ export default function App() {
         </div>
       </div>
 
-      {editing && <EditModal record={editing} config={config} onClose={() => setEditing(null)} showToast={showToast} />}
+      {editing && <EditModal record={editing} config={fullConfig} onClose={() => setEditing(null)} showToast={showToast} />}
       <Toast toast={toast} />
     </div>
   );
