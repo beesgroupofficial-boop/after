@@ -396,6 +396,7 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
   const now = businessDate();
   const [period, setPeriod] = useState(periodKeyOf(now));
   const [openCast, setOpenCast] = useState(null);
+  const [detailCast, setDetailCast] = useState(null); // キャスト別件数の表で開いているキャスト
 
   const periodData = useMemo(() => {
     const [s, e] = periodRange(month, period);
@@ -467,34 +468,30 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
       </div>
 
       {(() => {
-        // キャスト別のアフター件数とバック金額(店舗の内訳つき)。折半の伝票は、参加した各キャストに1件ずつ数える(MASHレジの数え方と同じ)
-        const cm = {}, sm = {};
+        // キャスト別のアフター件数。キャストをタップすると、金額・店舗別・明細が開く。折半の伝票は、参加した各キャストに1件ずつ数える(MASHレジの数え方と同じ)
+        const cm = {};
         records.forEach(r => {
           const st = r.store || "店舗不明";
-          if (!sm[st]) sm[st] = { store: st, n: 0, back: 0 };
           castsOf(r).forEach(c => {
             const pk = periodKeyOf(r.date), amt = shareFor(r, c);
-            if (!cm[c]) cm[c] = { cast: c, p1: 0, p2: 0, b1: 0, b2: 0, stores: {} };
+            if (!cm[c]) cm[c] = { cast: c, p1: 0, p2: 0, b1: 0, b2: 0, stores: {}, list: [] };
             cm[c][pk]++;
             cm[c][pk === "p1" ? "b1" : "b2"] += amt;
-            cm[c].stores[st] = (cm[c].stores[st] || 0) + 1;
-            sm[st].n++; sm[st].back += amt;
+            if (!cm[c].stores[st]) cm[c].stores[st] = { n: 0, back: 0 };
+            cm[c].stores[st].n++; cm[c].stores[st].back += amt;
+            cm[c].list.push({ r, amt });
           });
         });
         const rows = Object.values(cm).sort((a, b) => (b.p1 + b.p2) - (a.p1 + a.p2) || a.cast.localeCompare(b.cast, "ja"));
         if (!rows.length) return null;
-        const tot = rows.reduce((a, x) => ({ p1: a.p1 + x.p1, p2: a.p2 + x.p2, b1: a.b1 + x.b1, b2: a.b2 + x.b2 }), { p1: 0, p2: 0, b1: 0, b2: 0 });
+        const tot = rows.reduce((a, x) => ({ p1: a.p1 + x.p1, p2: a.p2 + x.p2 }), { p1: 0, p2: 0 });
+        const cell = (on) => ({ textAlign: "right", padding: "12px 6px", fontSize: 15, fontWeight: on ? 700 : 500, color: on ? C.plum : C.text, whiteSpace: "nowrap" });
         const head = { textAlign: "right", padding: "4px 6px 8px", fontSize: 12, color: C.mid, fontWeight: 600, whiteSpace: "nowrap" };
-        const num = (n, amt, on, big) => (
-          <td style={{ textAlign: "right", padding: "8px 6px 2px", whiteSpace: "nowrap", verticalAlign: "top" }}>
-            <div style={{ fontSize: big ? 17 : 15, fontWeight: on ? 700 : 500, color: on ? C.plum : C.text }}>{n}件</div>
-            <div style={{ fontSize: 12, color: C.mid }}>{n ? yen(amt) : "−"}</div>
-          </td>
-        );
-        const storeList = Object.values(sm).sort((a, b) => b.n - a.n);
+        const box = { flex: 1, background: C.surface, border: "1px solid " + C.border, borderRadius: 10, padding: "8px 6px", textAlign: "center" };
         return (
           <div style={{ ...card, marginBottom: 14 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{parseInt(month.slice(5, 7), 10)}月 キャスト別アフター（件数・バック金額）</div>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 2 }}>{parseInt(month.slice(5, 7), 10)}月 キャスト別アフター件数</div>
+            <div style={{ fontSize: 12, color: C.light, marginBottom: 6 }}>キャストをタップすると、金額・店舗別・明細が開きます</div>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
@@ -505,38 +502,58 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
                 </tr>
               </thead>
               <tbody>
-                {rows.map(x => (
-                  <React.Fragment key={x.cast}>
-                    <tr style={{ borderTop: "1px solid " + C.border }}>
-                      <td style={{ padding: "8px 0 2px", fontSize: 15, fontWeight: 700, color: C.plum, verticalAlign: "top" }}>{x.cast}</td>
-                      {num(x.p1, x.b1, period === "p1", false)}
-                      {num(x.p2, x.b2, period === "p2", false)}
-                      {num(x.p1 + x.p2, x.b1 + x.b2, true, true)}
-                    </tr>
-                    <tr>
-                      <td colSpan={4} style={{ padding: "0 0 8px", fontSize: 12, color: C.violet, fontWeight: 600 }}>
-                        {Object.keys(x.stores).sort((a, b) => x.stores[b] - x.stores[a]).map(s => s + " " + x.stores[s] + "件").join("　／　")}
-                      </td>
-                    </tr>
-                  </React.Fragment>
-                ))}
+                {rows.map(x => {
+                  const op = detailCast === x.cast;
+                  return (
+                    <React.Fragment key={x.cast}>
+                      <tr onClick={() => setDetailCast(op ? null : x.cast)} style={{ borderTop: "1px solid " + C.border, cursor: "pointer", background: op ? C.lilac : "transparent" }}>
+                        <td style={{ ...cell(false), textAlign: "left", paddingLeft: 4, fontWeight: 700, color: C.plum }}>
+                          {x.cast}<span style={{ marginLeft: 6, fontSize: 11, color: C.light }}>{op ? "▲" : "▼"}</span>
+                        </td>
+                        <td style={cell(period === "p1")}>{x.p1}件</td>
+                        <td style={cell(period === "p2")}>{x.p2}件</td>
+                        <td style={{ ...cell(true), fontSize: 17 }}>{x.p1 + x.p2}件</td>
+                      </tr>
+                      {op && (
+                        <tr>
+                          <td colSpan={4} style={{ background: C.lilac, padding: "4px 8px 12px" }}>
+                            <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                              <div style={box}><div style={{ fontSize: 11, color: C.mid }}>1〜15日</div><div style={{ fontSize: 15, fontWeight: 700 }}>{yen(x.b1)}</div></div>
+                              <div style={box}><div style={{ fontSize: 11, color: C.mid }}>16〜末日</div><div style={{ fontSize: 15, fontWeight: 700 }}>{yen(x.b2)}</div></div>
+                              <div style={{ ...box, borderColor: C.violet }}><div style={{ fontSize: 11, color: C.mid }}>月計バック</div><div style={{ fontSize: 15, fontWeight: 700, color: C.plum }}>{yen(x.b1 + x.b2)}</div></div>
+                            </div>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: C.mid, marginBottom: 4 }}>店舗別</div>
+                            {Object.keys(x.stores).sort((a, b) => x.stores[b].n - x.stores[a].n).map(s => (
+                              <div key={s} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0" }}>
+                                <span style={{ fontWeight: 600 }}>{s}</span><span>{x.stores[s].n}件　<b>{yen(x.stores[s].back)}</b></span>
+                              </div>
+                            ))}
+                            <div style={{ fontSize: 12, fontWeight: 700, color: C.mid, margin: "10px 0 4px" }}>明細</div>
+                            {x.list.slice().sort((a, b) => (a.r.date < b.r.date ? 1 : a.r.date > b.r.date ? -1 : 0)).map(({ r, amt }) => (
+                              <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, padding: "6px 0", borderTop: "1px solid " + C.border }}>
+                                <div style={{ minWidth: 0 }}>
+                                  <div>{shortDate(r.date)}　{r.store || "店舗不明"}</div>
+                                  <div style={{ fontSize: 12, color: C.mid }}>
+                                    {[r.customerName && r.customerName + "様", "売上" + yen(r.amount), castsOf(r).length > 1 ? castsOf(r).length + "名折半" : ""].filter(Boolean).join("　")}
+                                  </div>
+                                </div>
+                                <div style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{yen(amt)}</div>
+                              </div>
+                            ))}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
                 <tr style={{ borderTop: "2px solid " + C.border }}>
-                  <td style={{ padding: "8px 0", fontSize: 14, color: C.mid, verticalAlign: "top" }}>合計（のべ）</td>
-                  {num(tot.p1, tot.b1, false, false)}
-                  {num(tot.p2, tot.b2, false, false)}
-                  {num(tot.p1 + tot.p2, tot.b1 + tot.b2, true, true)}
+                  <td style={{ ...cell(false), textAlign: "left", paddingLeft: 4, color: C.mid }}>合計（のべ）</td>
+                  <td style={cell(false)}>{tot.p1}件</td>
+                  <td style={cell(false)}>{tot.p2}件</td>
+                  <td style={{ ...cell(true), fontSize: 17 }}>{tot.p1 + tot.p2}件</td>
                 </tr>
               </tbody>
             </table>
-            <div style={{ borderTop: "1px solid " + C.border, marginTop: 8, paddingTop: 8 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: C.mid, marginBottom: 4 }}>店舗別（のべ件数・バック合計）</div>
-              {storeList.map(s => (
-                <div key={s.store} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "3px 0" }}>
-                  <span style={{ fontWeight: 600 }}>{s.store}</span>
-                  <span>{s.n}件　<b>{yen(s.back)}</b></span>
-                </div>
-              ))}
-            </div>
           </div>
         );
       })()}
