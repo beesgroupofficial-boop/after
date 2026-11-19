@@ -2,10 +2,11 @@ import React, { useState, useEffect, useMemo } from "react";
 
 // ───────── Firebase（index.html のCDN compat で初期化済み） ─────────
 const db = window._db;
-// MASHレジと同じFirebaseの after_casts / app_config を共用する（レジのアフター会計が自動でここに出る）
+// MASHレジと同じFirebaseを使う。レジのアフター会計(after_casts)は自動でここの集計に出る
 // after_casts = MASHレジが書く分(レジに出る)。after_records = このアプリで入力した分(レジには出さない。BEROなど)
 const COL = { records: "after_casts", mine: "after_records", config: "app_config" };
-const CONFIG_DOC = "main";
+// このアプリ専用の設定(キャスト・バック率・店舗)。MASHレジが使う app_config/main とは別の文書
+const CONFIG_DOC = "after";
 
 async function fsSet(col, id, data) { await db.collection(col).doc(String(id)).set(data); }
 async function fsMerge(col, id, data) { await db.collection(col).doc(String(id)).set(data, { merge: true }); }
@@ -579,27 +580,27 @@ function SettingsTab({ config, showToast }) {
     const n = castName.trim();
     if (!n) return;
     if (castList.includes(n)) return showToast("すでに登録されています", false);
-    fsMerge(COL.config, CONFIG_DOC, { afterCastList: [...castList, n] });
+    fsMerge(COL.config, CONFIG_DOC, { castList: [...castList, n] });
     setCastName("");
   }
   function removeCast(c) {
     if (!window.confirm(`${c}をキャスト一覧から外しますか？（過去の明細は残ります）`)) return;
-    fsMerge(COL.config, CONFIG_DOC, { afterCastList: castList.filter(x => x !== c) });
+    fsMerge(COL.config, CONFIG_DOC, { castList: castList.filter(x => x !== c) });
   }
   function setRate(cast, pk, r) {
     const next = { ...backRates, [cast]: { ...(backRates[cast] || {}), [pk]: r } };
-    fsMerge(COL.config, CONFIG_DOC, { afterBackRates: next });
+    fsMerge(COL.config, CONFIG_DOC, { backRates: next });
   }
   function addStore() {
     const n = storeName.trim();
     if (!n) return;
     if (stores.includes(n)) return showToast("すでに登録されています", false);
-    fsMerge(COL.config, CONFIG_DOC, { afterStores: [...stores, n] });
+    fsMerge(COL.config, CONFIG_DOC, { stores: [...stores, n] });
     setStoreName("");
   }
   function removeStore(s) {
     if (stores.length <= 1) return showToast("店舗は1つ以上必要です", false);
-    fsMerge(COL.config, CONFIG_DOC, { afterStores: stores.filter(x => x !== s) });
+    fsMerge(COL.config, CONFIG_DOC, { stores: stores.filter(x => x !== s) });
   }
 
   const chip = { display: "flex", alignItems: "center", gap: 4, background: C.lilac, border: "1px solid #DCCFF6", borderRadius: 8, padding: "5px 10px" };
@@ -675,7 +676,7 @@ function SettingsTab({ config, showToast }) {
 }
 
 // ───────── App ─────────
-const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BAR MASH", "BERO BERO BAR"] };
+const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BEROBEROBAR"] };
 
 export default function App() {
   const [tab, setTab] = useState("input");
@@ -710,15 +711,15 @@ export default function App() {
     return () => { u1(); u1b(); };
   }, [month]);
 
-  // キャスト名・バック率はMASHレジの設定(afterCastList / afterBackRates)と共通
+  // キャスト・バック率・店舗はこのアプリ専用の設定(MASHレジの設定とは別)
   useEffect(() => {
     if (!db) return;
     const u2 = db.collection(COL.config).doc(CONFIG_DOC).onSnapshot(snap => {
       const d = snap.data() || {};
       setConfig({
-        castList: Array.isArray(d.afterCastList) ? d.afterCastList : [],
-        backRates: d.afterBackRates || {},
-        stores: Array.isArray(d.afterStores) && d.afterStores.length ? d.afterStores : DEFAULT_CONFIG.stores,
+        castList: Array.isArray(d.castList) ? d.castList : [],
+        backRates: d.backRates || {},
+        stores: Array.isArray(d.stores) && d.stores.length ? d.stores : DEFAULT_CONFIG.stores,
       });
       setLoaded(true);
     }, () => showToast("設定を読み込めません。通信状態を確認してください", false));
