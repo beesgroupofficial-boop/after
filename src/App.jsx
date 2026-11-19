@@ -3,7 +3,8 @@ import React, { useState, useEffect, useMemo } from "react";
 // ───────── Firebase（index.html のCDN compat で初期化済み） ─────────
 const db = window._db;
 // MASHレジと同じFirebaseの after_casts / app_config を共用する（レジのアフター会計が自動でここに出る）
-const COL = { records: "after_casts", config: "app_config" };
+// after_casts = MASHレジが書く分(レジに出る)。after_records = このアプリで入力した分(レジには出さない。BEROなど)
+const COL = { records: "after_casts", mine: "after_records", config: "app_config" };
 const CONFIG_DOC = "main";
 
 async function fsSet(col, id, data) { await db.collection(col).doc(String(id)).set(data); }
@@ -67,18 +68,19 @@ function normalizeRecords(docs) {
   return Object.keys(groups).map(key => {
     const g = groups[key].slice().sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
     const f = g[0];
-    const casts = [], shares = {}, docIds = {}, castRates = {};
+    const casts = [], shares = {}, docIds = {}, docCols = {}, castRates = {};
     g.forEach(d => {
       const c = d.cast || (Array.isArray(d.casts) && d.casts[0]) || "不明";
       if (casts.includes(c)) return; // 同じキャストが重複していたら1件目だけ数える
       casts.push(c);
       shares[c] = Number(d.backAmount) || 0;
       docIds[c] = d.id;
+      docCols[c] = d._col || COL.records;
       castRates[c] = d.backRate ?? 0.1;
     });
     const amount = Number(f.amount) || 0;
     return {
-      id: key, saleId: key, date: f.date, store: f.store || "", casts, cast: casts.join("・"), castRates, shares, docIds,
+      id: key, saleId: key, date: f.date, store: f.store || "", casts, cast: casts.join("・"), castRates, shares, docIds, docCols, col: f._col || COL.records,
       backRate: f.backRate ?? 0.1, amount, taxExcluded: Math.floor(amount / 1.1),
       backAmount: casts.reduce((a, c) => a + shares[c], 0),
       customerName: f.customerName || "", memo: f.memo || "", seat: f.seat || "", createdAt: f.createdAt || "",
@@ -91,8 +93,10 @@ function shareFor(r, cast) { return r.shares && r.shares[cast] != null ? r.share
 async function writeGroup(rec, casts, castRates, fields) {
   const calc = computeAfter(fields.amount, castRates);
   const ids = rec.docIds || {};
+  // 新規はこのアプリ専用の保管場所へ。MASHレジ由来の明細を直すときは元の場所へ書く
+  const colOf = c => (rec.docCols && rec.docCols[c]) || rec.col || COL.mine;
   const now = new Date().toISOString();
-  for (const c of Object.keys(ids)) { if (!casts.includes(c)) await fsDel(COL.records, ids[c]); }
+  for (const c of Object.keys(ids)) { if (!casts.includes(c)) await fsDel(colOf(c), ids[c]); }
   for (const c of casts) {
     const id = ids[c] || (Date.now() + "_a_" + c);
     const data = {
@@ -102,11 +106,11 @@ async function writeGroup(rec, casts, castRates, fields) {
     };
     if (!ids[c]) { data.createdAt = rec.createdAt || now; data.seat = rec.seat || ""; data.source = "after-app"; }
     else data.updatedAt = now;
-    await fsMerge(COL.records, id, data);
+    await fsMerge(colOf(c), id, data);
   }
 }
 async function deleteGroup(rec) {
-  for (const c of Object.keys(rec.docIds || {})) await fsDel(COL.records, rec.docIds[c]);
+  for (const c of Object.keys(rec.docIds || {})) await fsDel((rec.docCols && rec.docCols[c]) || rec.col || COL.mine, rec.docIds[c]);
 }
 
 // ───────── デザイン ─────────
@@ -675,7 +679,9 @@ const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BAR MASH", "BERO
 
 export default function App() {
   const [tab, setTab] = useState("input");
-  const [records, setRecords] = useState([]);
+  const [rawA, setRawA] = useState([]); // MASHレジ由来(after_casts)
+  const [rawB, setRawB] = useState([]); // このアプリで入力した分(after_records)
+  const records = useMemo(() => normalizeRecords(rawA.concat(rawB)), [rawA, rawB]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -694,10 +700,14 @@ export default function App() {
     const from = month + "-01";
     const to = month + "-31";
     const u1 = db.collection(COL.records).where("date", ">=", from).where("date", "<=", to).onSnapshot(
-      snap => setRecords(normalizeRecords(snap.docs.map(d => ({ ...d.data(), id: d.id })))),
+      snap => setRawA(snap.docs.map(d => ({ ...d.data(), id: d.id, _col: COL.records }))),
       () => showToast("データを読み込めません。通信状態を確認してください", false)
     );
-    return () => u1();
+    const u1b = db.collection(COL.mine).where("date", ">=", from).where("date", "<=", to).onSnapshot(
+      snap => setRawB(snap.docs.map(d => ({ ...d.data(), id: d.id, _col: COL.mine }))),
+      () => showToast("データを読み込めません。通信状態を確認してください", false)
+    );
+    return () => { u1(); u1b(); };
   }, [month]);
 
   // キャスト名・バック率はMASHレジの設定(afterCastList / afterBackRates)と共通
