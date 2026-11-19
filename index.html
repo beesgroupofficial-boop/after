@@ -7,19 +7,18 @@
     <title>アフターバック</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet" />
-    <!-- Firebase compat SDK（MASHと同じCDN方式） -->
+    <!-- Firebase compat SDK。データはMASHレジと同じFirebaseを共用 -->
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
     <script>
-      const firebaseConfig = {
-        apiKey: "AIzaSyBo9wZn0HUmERSaScR0DDpXplaxFuSGUIg",
-        authDomain: "after-d989a.firebaseapp.com",
-        projectId: "after-d989a",
-        storageBucket: "after-d989a.firebasestorage.app",
-        messagingSenderId: "595714794541",
-        appId: "1:595714794541:web:8081ade539a7d0a01d44a4"
-      };
-      firebase.initializeApp(firebaseConfig);
+      firebase.initializeApp({
+        apiKey: "AIzaSyAcGoPrd09VAVB53ChCjkZwcLDRKJvZGw8",
+        authDomain: "bar-mash-pos-c7f29.firebaseapp.com",
+        projectId: "bar-mash-pos-c7f29",
+        storageBucket: "bar-mash-pos-c7f29.firebasestorage.app",
+        messagingSenderId: "17828703998",
+        appId: "1:17828703998:web:a86f2abd0773a58c02bfaf"
+      });
       window._db = firebase.firestore();
     </script>
   </head>

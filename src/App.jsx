@@ -2,7 +2,9 @@ import React, { useState, useEffect, useMemo } from "react";
 
 // ───────── Firebase（index.html のCDN compat で初期化済み） ─────────
 const db = window._db;
-const COL = { records: "after_records", config: "app_config" };
+// MASHレジと同じFirebaseの after_casts / app_config を共用する（レジのアフター会計が自動でここに出る）
+// after_casts = MASHレジが書く分(レジに出る)。after_records = このアプリで入力した分(レジには出さない。BEROなど)
+const COL = { records: "after_casts", mine: "after_records", config: "app_config" };
 const CONFIG_DOC = "main";
 
 async function fsSet(col, id, data) { await db.collection(col).doc(String(id)).set(data); }
@@ -55,6 +57,62 @@ function castRatesOf(r) {
 }
 function toggleIn(list, v) { return list.includes(v) ? list.filter(x => x !== v) : [...list, v]; }
 
+// ───────── MASHレジと共通のデータ形式 ─────────
+// MASHは「キャスト1人につき1件(after_casts)」で保存する。折半の伝票は saleId で束ねて、1件の明細として扱う
+function normalizeRecords(docs) {
+  const groups = {};
+  docs.forEach(d => {
+    const key = String(d.saleId || d.id);
+    (groups[key] = groups[key] || []).push(d);
+  });
+  return Object.keys(groups).map(key => {
+    const g = groups[key].slice().sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+    const f = g[0];
+    const casts = [], shares = {}, docIds = {}, docCols = {}, castRates = {};
+    g.forEach(d => {
+      const c = d.cast || (Array.isArray(d.casts) && d.casts[0]) || "不明";
+      if (casts.includes(c)) return; // 同じキャストが重複していたら1件目だけ数える
+      casts.push(c);
+      shares[c] = Number(d.backAmount) || 0;
+      docIds[c] = d.id;
+      docCols[c] = d._col || COL.records;
+      castRates[c] = d.backRate ?? 0.1;
+    });
+    const amount = Number(f.amount) || 0;
+    return {
+      id: key, saleId: key, date: f.date, store: f.store || "", casts, cast: casts.join("・"), castRates, shares, docIds, docCols, col: f._col || COL.records,
+      backRate: f.backRate ?? 0.1, amount, taxExcluded: Math.floor(amount / 1.1),
+      backAmount: casts.reduce((a, c) => a + shares[c], 0),
+      customerName: f.customerName || "", memo: f.memo || "", seat: f.seat || "", createdAt: f.createdAt || "",
+    };
+  }).sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+}
+function shareFor(r, cast) { return r.shares && r.shares[cast] != null ? r.shares[cast] : shareOf(r); }
+
+// 明細を保存する：キャスト1人につき1件(MASHと同じ)。外したキャストの件は削除、他の項目(席など)は残す
+async function writeGroup(rec, casts, castRates, fields) {
+  const calc = computeAfter(fields.amount, castRates);
+  const ids = rec.docIds || {};
+  // 新規はこのアプリ専用の保管場所へ。MASHレジ由来の明細を直すときは元の場所へ書く
+  const colOf = c => (rec.docCols && rec.docCols[c]) || rec.col || COL.mine;
+  const now = new Date().toISOString();
+  for (const c of Object.keys(ids)) { if (!casts.includes(c)) await fsDel(colOf(c), ids[c]); }
+  for (const c of casts) {
+    const id = ids[c] || (Date.now() + "_a_" + c);
+    const data = {
+      id, saleId: rec.saleId, date: fields.date, store: fields.store || "", cast: c, casts,
+      amount: Number(fields.amount), taxExcluded: calc.taxExcluded, backAmount: calc.share, backRate: calc.backRate,
+      castCount: casts.length, customerName: fields.customerName || "", memo: fields.memo || "",
+    };
+    if (!ids[c]) { data.createdAt = rec.createdAt || now; data.seat = rec.seat || ""; data.source = "after-app"; }
+    else data.updatedAt = now;
+    await fsMerge(colOf(c), id, data);
+  }
+}
+async function deleteGroup(rec) {
+  for (const c of Object.keys(rec.docIds || {})) await fsDel((rec.docCols && rec.docCols[c]) || rec.col || COL.mine, rec.docIds[c]);
+}
+
 // ───────── デザイン ─────────
 const C = {
   bg: "#F6F4F9", surface: "#FFFFFF", border: "#E4DFEC", text: "#1E1B24",
@@ -101,12 +159,12 @@ function printAfterSlips(castSummary, month, period) {
     let body;
     if (recs.length <= 14) {
       body = "<table><thead><tr><th>日付</th><th>店・お客様</th><th class=r>小計</th><th class=r>率</th><th class=r>バック</th></tr></thead><tbody>"
-        + recs.map(r => "<tr><td>" + day(r) + "</td><td>" + desc(r) + "</td><td class=r>" + yen(sub(r)) + "</td><td class=r>" + rate(r) + "</td><td class=r>" + yen(shareOf(r)) + "</td></tr>").join("") + "</tbody></table>";
+        + recs.map(r => "<tr><td>" + day(r) + "</td><td>" + desc(r) + "</td><td class=r>" + yen(sub(r)) + "</td><td class=r>" + rate(r) + "</td><td class=r>" + yen(shareFor(r, c.cast)) + "</td></tr>").join("") + "</tbody></table>";
     } else {
       // 明細が多い人は2列に分けて並べる（小計は下の合計欄に表示）
       const half = Math.ceil(recs.length / 2);
       const t = part => "<table><thead><tr><th>日付</th><th>店・お客様</th><th class=r>率</th><th class=r>バック</th></tr></thead><tbody>"
-        + part.map(r => "<tr><td>" + day(r) + "</td><td>" + desc(r) + "</td><td class=r>" + rate(r) + "</td><td class=r>" + yen(shareOf(r)) + "</td></tr>").join("") + "</tbody></table>";
+        + part.map(r => "<tr><td>" + day(r) + "</td><td>" + desc(r) + "</td><td class=r>" + rate(r) + "</td><td class=r>" + yen(shareFor(r, c.cast)) + "</td></tr>").join("") + "</tbody></table>";
       body = "<div class=two>" + t(recs.slice(0, half)) + t(recs.slice(half)) + "</div>";
     }
     return "<div class=cell><div class=head><b>アフターバック明細</b></div><div class=mid>" + esc(label) + "</div><div class=name>" + esc(c.cast) + "<small>様</small></div><div class=rows>" + body + "</div>"
@@ -171,13 +229,8 @@ function InputTab({ config, showToast }) {
     if (!canSave) return;
     setSaving(true);
     try {
-      const id = Date.now() + "_a";
-      await fsSet(COL.records, id, {
-        id, date, store, casts, cast: casts.join("・"), castRates,
-        customerName: customerName.trim(), memo: memo.trim(),
-        amount: Number(amount), taxExcluded, backRate, backAmount, share,
-        createdAt: new Date().toISOString(),
-      });
+      await writeGroup({ saleId: "after_" + Date.now(), docIds: {} }, casts, castRates,
+        { date, store, customerName: customerName.trim(), memo: memo.trim(), amount: Number(amount) });
       showToast(casts.length > 1 ? `登録しました ${casts.length}人で折半 1人${yen(share)}` : `登録しました ${casts[0]} バック${yen(share)}`);
       setCustomerName(""); setAmount(""); setMemo(""); setCasts([]);
     } catch (e) {
@@ -270,12 +323,8 @@ function EditModal({ record, config, onClose, showToast }) {
 
   async function save() {
     if (casts.length === 0 || !(Number(amount) > 0)) return;
-    await fsSet(COL.records, record.id, {
-      ...record, date, store, casts, cast: casts.join("・"), castRates,
-      customerName: customerName.trim(), memo: memo.trim(),
-      amount: Number(amount), taxExcluded, backRate, backAmount, share,
-      updatedAt: new Date().toISOString(),
-    });
+    await writeGroup(record, casts, castRates,
+      { date, store, customerName: customerName.trim(), memo: memo.trim(), amount: Number(amount) });
     showToast("変更を保存しました");
     onClose();
   }
@@ -337,9 +386,8 @@ function EditModal({ record, config, onClose, showToast }) {
 }
 
 // ───────── 集計タブ ─────────
-function SummaryTab({ records, isAdmin, onEdit, showToast }) {
+function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
   const now = businessDate();
-  const [month, setMonth] = useState(now.slice(0, 7));
   const [period, setPeriod] = useState(periodKeyOf(now));
   const [openCast, setOpenCast] = useState(null);
 
@@ -355,7 +403,7 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
       castsOf(r).forEach(c => {
         if (!m[c]) m[c] = { cast: c, count: 0, backAmount: 0, records: [] };
         m[c].count++;
-        m[c].backAmount += shareOf(r);
+        m[c].backAmount += shareFor(r, c);
         m[c].records.push(r);
       });
     });
@@ -363,7 +411,7 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
     return Object.values(m).sort((a, b) => b.backAmount - a.backAmount);
   }, [periodData]);
 
-  const totalBack = periodData.reduce((a, r) => a + shareOf(r) * castsOf(r).length, 0);
+  const totalBack = periodData.reduce((a, r) => a + castsOf(r).reduce((s, c) => s + shareFor(r, c), 0), 0);
   const totalAmount = periodData.reduce((a, r) => a + (r.amount || 0), 0);
   const periodLabel = period === "p1" ? "1〜15日" : "16〜末日";
 
@@ -372,9 +420,8 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
     const rates = { ...castRatesOf(r) };
     delete rates[cast];
     const rest = Object.keys(rates);
-    if (rest.length === 0) return fsDel(COL.records, r.id);
-    const calc = computeAfter(r.amount, rates);
-    return fsSet(COL.records, r.id, { ...r, casts: rest, cast: rest.join("・"), castRates: rates, ...calc, updatedAt: new Date().toISOString() });
+    if (rest.length === 0) return deleteGroup(r);
+    return writeGroup(r, rest, rates, { date: r.date, store: r.store, customerName: r.customerName, memo: r.memo, amount: r.amount });
   }
   async function delCast(cast, recs) {
     const shared = recs.filter(r => castsOf(r).length > 1).length;
@@ -386,7 +433,7 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
   async function delOne(r) {
     const who = castsOf(r).join("・");
     if (!window.confirm(`${shortDate(r.date)} ${who} ${yen(r.amount)} を削除しますか？`)) return;
-    await fsDel(COL.records, r.id);
+    await deleteGroup(r);
     showToast("削除しました");
   }
 
@@ -412,6 +459,51 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
         <div style={{ fontSize: 34, fontWeight: 700, marginTop: 2 }}>{yen(totalBack)}</div>
         <div style={{ fontSize: 13, color: "#D9CCF5", marginTop: 2 }}>{periodData.length}件　売上 {yen(totalAmount)}</div>
       </div>
+
+      {(() => {
+        // キャスト別のアフター件数（折半の伝票も、参加した各キャストに1件ずつ数える。MASHレジの数え方と同じ）
+        const cm = {};
+        records.forEach(r => castsOf(r).forEach(c => {
+          if (!cm[c]) cm[c] = { cast: c, p1: 0, p2: 0 };
+          cm[c][periodKeyOf(r.date)]++;
+        }));
+        const rows = Object.values(cm).sort((a, b) => (b.p1 + b.p2) - (a.p1 + a.p2) || a.cast.localeCompare(b.cast, "ja"));
+        if (!rows.length) return null;
+        const tot = rows.reduce((a, x) => ({ p1: a.p1 + x.p1, p2: a.p2 + x.p2 }), { p1: 0, p2: 0 });
+        const cell = (on) => ({ textAlign: "right", padding: "8px 6px", fontSize: 15, fontWeight: on ? 700 : 500, color: on ? C.plum : C.text, whiteSpace: "nowrap" });
+        const head = { textAlign: "right", padding: "4px 6px 8px", fontSize: 12, color: C.mid, fontWeight: 600, whiteSpace: "nowrap" };
+        return (
+          <div style={{ ...card, marginBottom: 14 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{parseInt(month.slice(5, 7), 10)}月 キャスト別アフター件数</div>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...head, textAlign: "left", paddingLeft: 0 }}>キャスト</th>
+                  <th style={head}>1〜15日</th>
+                  <th style={head}>16〜末日</th>
+                  <th style={head}>月計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(x => (
+                  <tr key={x.cast} style={{ borderTop: "1px solid " + C.border }}>
+                    <td style={{ ...cell(false), textAlign: "left", paddingLeft: 0, fontWeight: 700, color: C.plum }}>{x.cast}</td>
+                    <td style={cell(period === "p1")}>{x.p1}件</td>
+                    <td style={cell(period === "p2")}>{x.p2}件</td>
+                    <td style={{ ...cell(true), fontSize: 17 }}>{x.p1 + x.p2}件</td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: "2px solid " + C.border }}>
+                  <td style={{ ...cell(false), textAlign: "left", paddingLeft: 0, color: C.mid }}>合計（のべ）</td>
+                  <td style={cell(false)}>{tot.p1}件</td>
+                  <td style={cell(false)}>{tot.p2}件</td>
+                  <td style={{ ...cell(true), fontSize: 17 }}>{tot.p1 + tot.p2}件</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        );
+      })()}
 
       {castSummary.length === 0 && (
         <div style={{ textAlign: "center", color: C.light, padding: "36px 0", fontSize: 14 }}>この期間のアフターはまだありません</div>
@@ -454,7 +546,7 @@ function SummaryTab({ records, isAdmin, onEdit, showToast }) {
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                        <span style={{ fontWeight: 700 }}>{yen(shareOf(r))}</span>
+                        <span style={{ fontWeight: 700 }}>{yen(shareFor(r, cast))}</span>
                         {isAdmin && (<>
                           <button onClick={() => onEdit(r)} style={{ background: C.lilac, border: "none", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: C.plum, cursor: "pointer" }}>編集</button>
                           <button onClick={() => delOne(r)} style={{ background: "none", border: "none", color: C.light, cursor: "pointer", fontSize: 15 }}>✕</button>
@@ -487,27 +579,27 @@ function SettingsTab({ config, showToast }) {
     const n = castName.trim();
     if (!n) return;
     if (castList.includes(n)) return showToast("すでに登録されています", false);
-    fsMerge(COL.config, CONFIG_DOC, { castList: [...castList, n] });
+    fsMerge(COL.config, CONFIG_DOC, { afterCastList: [...castList, n] });
     setCastName("");
   }
   function removeCast(c) {
     if (!window.confirm(`${c}をキャスト一覧から外しますか？（過去の明細は残ります）`)) return;
-    fsMerge(COL.config, CONFIG_DOC, { castList: castList.filter(x => x !== c) });
+    fsMerge(COL.config, CONFIG_DOC, { afterCastList: castList.filter(x => x !== c) });
   }
   function setRate(cast, pk, r) {
     const next = { ...backRates, [cast]: { ...(backRates[cast] || {}), [pk]: r } };
-    fsMerge(COL.config, CONFIG_DOC, { backRates: next });
+    fsMerge(COL.config, CONFIG_DOC, { afterBackRates: next });
   }
   function addStore() {
     const n = storeName.trim();
     if (!n) return;
     if (stores.includes(n)) return showToast("すでに登録されています", false);
-    fsMerge(COL.config, CONFIG_DOC, { stores: [...stores, n] });
+    fsMerge(COL.config, CONFIG_DOC, { afterStores: [...stores, n] });
     setStoreName("");
   }
   function removeStore(s) {
     if (stores.length <= 1) return showToast("店舗は1つ以上必要です", false);
-    fsMerge(COL.config, CONFIG_DOC, { stores: stores.filter(x => x !== s) });
+    fsMerge(COL.config, CONFIG_DOC, { afterStores: stores.filter(x => x !== s) });
   }
 
   const chip = { display: "flex", alignItems: "center", gap: 4, background: C.lilac, border: "1px solid #DCCFF6", borderRadius: 8, padding: "5px 10px" };
@@ -583,15 +675,18 @@ function SettingsTab({ config, showToast }) {
 }
 
 // ───────── App ─────────
-const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BAR MASH"] };
+const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BAR MASH", "BERO BERO BAR"] };
 
 export default function App() {
   const [tab, setTab] = useState("input");
-  const [records, setRecords] = useState([]);
+  const [rawA, setRawA] = useState([]); // MASHレジ由来(after_casts)
+  const [rawB, setRawB] = useState([]); // このアプリで入力した分(after_records)
+  const records = useMemo(() => normalizeRecords(rawA.concat(rawB)), [rawA, rawB]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState(null);
   const [toast, setToast] = useState(null);
+  const [month, setMonth] = useState(businessDate().slice(0, 7));
 
   function showToast(msg, ok = true) {
     setToast({ msg, ok });
@@ -599,22 +694,35 @@ export default function App() {
     window.__afterToast = setTimeout(() => setToast(null), 2200);
   }
 
+  // 選んだ月の分だけ読む（Firebaseの読み取り回数を抑える）
   useEffect(() => {
     if (!db) return;
-    const u1 = db.collection(COL.records).orderBy("createdAt", "desc").onSnapshot(
-      snap => setRecords(snap.docs.map(d => ({ ...d.data(), id: d.id }))),
-      () => showToast("データを読み込めません。Firebaseの設定を確認してください", false)
+    const from = month + "-01";
+    const to = month + "-31";
+    const u1 = db.collection(COL.records).where("date", ">=", from).where("date", "<=", to).onSnapshot(
+      snap => setRawA(snap.docs.map(d => ({ ...d.data(), id: d.id, _col: COL.records }))),
+      () => showToast("データを読み込めません。通信状態を確認してください", false)
     );
+    const u1b = db.collection(COL.mine).where("date", ">=", from).where("date", "<=", to).onSnapshot(
+      snap => setRawB(snap.docs.map(d => ({ ...d.data(), id: d.id, _col: COL.mine }))),
+      () => showToast("データを読み込めません。通信状態を確認してください", false)
+    );
+    return () => { u1(); u1b(); };
+  }, [month]);
+
+  // キャスト名・バック率はMASHレジの設定(afterCastList / afterBackRates)と共通
+  useEffect(() => {
+    if (!db) return;
     const u2 = db.collection(COL.config).doc(CONFIG_DOC).onSnapshot(snap => {
       const d = snap.data() || {};
       setConfig({
-        castList: Array.isArray(d.castList) ? d.castList : [],
-        backRates: d.backRates || {},
-        stores: Array.isArray(d.stores) && d.stores.length ? d.stores : DEFAULT_CONFIG.stores,
+        castList: Array.isArray(d.afterCastList) ? d.afterCastList : [],
+        backRates: d.afterBackRates || {},
+        stores: Array.isArray(d.afterStores) && d.afterStores.length ? d.afterStores : DEFAULT_CONFIG.stores,
       });
       setLoaded(true);
-    });
-    return () => { u1(); u2(); };
+    }, () => showToast("設定を読み込めません。通信状態を確認してください", false));
+    return () => u2();
   }, []);
 
   if (!db) {
@@ -633,7 +741,7 @@ export default function App() {
         ) : (
           <>
             {tab === "input" && <InputTab config={config} showToast={showToast} />}
-            {tab === "summary" && <SummaryTab records={records} isAdmin={isAdmin} onEdit={setEditing} showToast={showToast} />}
+            {tab === "summary" && <SummaryTab records={records} month={month} setMonth={setMonth} isAdmin={isAdmin} onEdit={setEditing} showToast={showToast} />}
             {tab === "settings" && isAdmin && <SettingsTab config={config} showToast={showToast} />}
           </>
         )}
