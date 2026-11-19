@@ -111,6 +111,21 @@ async function writeGroup(rec, casts, castRates, fields) {
     await fsMerge(colOf(c), id, data);
   }
 }
+// 二重入力の確認: 同じ日・同じ金額で、同じキャストを含む登録がすでにあるか(MASHレジ由来・このアプリ入力の両方を見る)
+function sameEntry(d, amount, casts) {
+  const c = d.cast || (Array.isArray(d.casts) && d.casts[0]);
+  return Number(d.amount) === Number(amount) && casts.includes(c);
+}
+async function findDuplicate(date, amount, casts) {
+  try {
+    const found = [];
+    for (const col of [COL.records, COL.mine]) {
+      const snap = await db.collection(col).where("date", "==", date).get();
+      snap.docs.forEach(x => { const d = x.data(); if (sameEntry(d, amount, casts)) found.push(d); });
+    }
+    return found[0] || null;
+  } catch (e) { return null; } // 確認に失敗しても入力は止めない
+}
 async function deleteGroup(rec) {
   for (const c of Object.keys(rec.docIds || {})) await fsDel((rec.docCols && rec.docCols[c]) || rec.col || COL.mine, rec.docIds[c]);
 }
@@ -234,6 +249,8 @@ function InputTab({ config, showToast }) {
     if (!canSave) return;
     setSaving(true);
     try {
+      const dup = await findDuplicate(date, Number(amount), casts);
+      if (dup && !window.confirm("同じ日に、同じ金額（" + yen(dup.amount) + "）で同じキャスト（" + dup.cast + "）の登録がすでにあります（" + (dup.store || "店舗不明") + "）。\nMASHレジで登録済みの場合、二重になります。\nそれでも登録しますか？")) { setSaving(false); return; }
       await writeGroup({ saleId: "after_" + Date.now(), docIds: {}, col: store === MASH_STORE ? COL.records : COL.mine }, casts, castRates,
         { date, store, customerName: customerName.trim(), memo: memo.trim(), amount: Number(amount) });
       showToast(casts.length > 1 ? `登録しました ${casts.length}人で折半 1人${yen(share)}` : `登録しました ${casts[0]} バック${yen(share)}`);
