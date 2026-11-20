@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 
 // ───────── Firebase（index.html のCDN compat で初期化済み） ─────────
 const db = window._db;
 // MASHレジと同じFirebaseを使う。レジのアフター会計(after_casts)は自動でここの集計に出る
 // after_casts = MASHレジが書く分(レジに出る)。after_records = このアプリで入力した分(レジには出さない。BEROなど)
-const COL = { records: "after_casts", mine: "after_records", config: "app_config" };
+const COL = { records: "after_casts", mine: "after_records", config: "app_config", sales: "sales" };
 // このアプリ専用の設定(キャスト・バック率・店舗)。MASHレジが使う app_config/main とは別の文書
 const CONFIG_DOC = "after";
 const MASH_STORE = "BAR MASH"; // MASHレジのアフターと同じ店舗名。この店舗で入力した分はレジ(after_casts)にも出る
@@ -409,7 +409,7 @@ function EditModal({ record, config, onClose, showToast }) {
 }
 
 // ───────── 集計タブ ─────────
-function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
+function SummaryTab({ records, noSale, month, setMonth, isAdmin, onEdit, showToast }) {
   const now = businessDate();
   const [period, setPeriod] = useState(periodKeyOf(now));
   const [openCast, setOpenCast] = useState(null);
@@ -485,6 +485,18 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
       </div>
 
       {(() => {
+        const miss = records.filter(r => noSale[r.saleId] === true);
+        if (!miss.length) return null;
+        return (
+          <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 12, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#78350F", lineHeight: 1.7 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>レジに売上がないアフター {miss.length}件</div>
+            <div>レジで売上が削除された可能性があります。不要なら、下のキャストのカードを開いて削除してください。</div>
+            {miss.map(r => <div key={r.id}>・{shortDate(r.date)}　{r.cast}　{yen(r.amount)}（{r.store || "店舗不明"}）</div>)}
+          </div>
+        );
+      })()}
+
+      {(() => {
         // キャスト別のアフター件数。キャストをタップすると、金額・店舗別・明細が開く。折半の伝票は、参加した各キャストに1件ずつ数える(MASHレジの数え方と同じ)
         const cm = {};
         records.forEach(r => {
@@ -550,6 +562,7 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
                               <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, padding: "6px 0", borderTop: "1px solid " + C.border }}>
                                 <div style={{ minWidth: 0 }}>
                                   <div>{shortDate(r.date)}　{r.store || "店舗不明"}</div>
+                                  {noSale[r.saleId] === true && <div style={{ fontSize: 12, color: C.danger, fontWeight: 700 }}>レジに売上がありません（削除された可能性）</div>}
                                   <div style={{ fontSize: 12, color: C.mid }}>
                                     {[r.customerName && r.customerName + "様", "売上" + yen(r.amount), castsOf(r).length > 1 ? castsOf(r).length + "名折半" : ""].filter(Boolean).join("　")}
                                   </div>
@@ -611,6 +624,7 @@ function SummaryTab({ records, month, setMonth, isAdmin, onEdit, showToast }) {
                         {others.length > 0 && (
                           <div style={{ color: C.violet, fontSize: 12, fontWeight: 600 }}>{others.join("・")}と折半（総額{yen(r.backAmount)}）</div>
                         )}
+                        {noSale[r.saleId] === true && <div style={{ fontSize: 12, color: C.danger, fontWeight: 700 }}>レジに売上がありません（削除された可能性）</div>}
                         <div style={{ color: C.light, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {[r.store, r.customerName && `${r.customerName}様`, r.memo].filter(Boolean).join("／")}
                         </div>
@@ -750,6 +764,8 @@ const DEFAULT_CONFIG = { castList: [], backRates: {}, stores: ["BEROBEROBAR"] };
 export default function App() {
   const [tab, setTab] = useState("input");
   const [mashCfg, setMashCfg] = useState({ castList: [], backRates: {} }); // MASHレジの設定(afterCastList / afterBackRates)
+  const [noSale, setNoSale] = useState({}); // {saleId: true} = レジの売上が見つからないアフター
+  const checkedSales = useRef({});
   const [rawA, setRawA] = useState([]); // MASHレジ由来(after_casts)
   const [rawB, setRawB] = useState([]); // このアプリで入力した分(after_records)
   const records = useMemo(() => normalizeRecords(rawA.concat(rawB)), [rawA, rawB]);
@@ -804,6 +820,26 @@ export default function App() {
     return () => { u2(); u3(); };
   }, []);
 
+  // MASHレジ由来のアフターについて、元の売上がレジに残っているか確かめる(売上が削除されたアフターを見つける)。売上1件=読み取り1回、確かめた分は再確認しない
+  useEffect(() => {
+    if (!db) return;
+    const ids = [...new Set(records.filter(r => r.col === COL.records && /^\d+$/.test(String(r.saleId))).map(r => String(r.saleId)))]
+      .filter(id => !(id in checkedSales.current));
+    if (!ids.length) return;
+    ids.forEach(id => { checkedSales.current[id] = "pending"; });
+    Promise.all(ids.map(async id => {
+      try { const s = await db.collection(COL.sales).doc(id).get(); return [id, !s.exists]; }
+      catch (e) { return [id, null]; }
+    })).then(res => {
+      const add = {};
+      res.forEach(([id, missing]) => {
+        if (missing === null) delete checkedSales.current[id];
+        else { checkedSales.current[id] = missing; if (missing) add[id] = true; }
+      });
+      if (Object.keys(add).length) setNoSale(p => ({ ...p, ...add }));
+    });
+  }, [records]);
+
   const fullConfig = { ...config, mash: mashCfg };
 
   if (!db) {
@@ -822,7 +858,7 @@ export default function App() {
         ) : (
           <>
             {tab === "input" && <InputTab config={fullConfig} showToast={showToast} />}
-            {tab === "summary" && <SummaryTab records={records} month={month} setMonth={setMonth} isAdmin={isAdmin} onEdit={setEditing} showToast={showToast} />}
+            {tab === "summary" && <SummaryTab records={records} noSale={noSale} month={month} setMonth={setMonth} isAdmin={isAdmin} onEdit={setEditing} showToast={showToast} />}
             {tab === "settings" && isAdmin && <SettingsTab config={config} showToast={showToast} />}
           </>
         )}
